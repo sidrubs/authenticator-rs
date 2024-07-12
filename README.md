@@ -2,8 +2,16 @@
 
 ## Notes
 
-- Currently add the changes [here](https://github.com/mozilla/authenticator-rs/compare/ctap2-2021...sandbox-quantum:authenticator-rs_fork:nitrokey-pqc-fido2) to the latest version of `authenticator-rs`.
+### Changes
+- Currently adding the changes [here](https://github.com/mozilla/authenticator-rs/compare/ctap2-2021...sandbox-quantum:authenticator-rs_fork:nitrokey-pqc-fido2) to the latest version of `authenticator-rs`.
   - Added `Cargo.toml`
+  - Starting to add `src/crypto/mod.rs`, added all the bits (I think). Just need to get it to compile.
+
+
+### Building
+
+- Need `mercurial` installed for `nss-gk-api` do clone nss.
+- Need `gyp` installed for `nss-gk-api` do clone nss.
 
 [![Build Status](https://travis-ci.org/mozilla/authenticator-rs.svg?branch=master)](https://travis-ci.org/mozilla/authenticator-rs)
 ![Maturity Level](https://img.shields.io/badge/maturity-release-green.svg)
