@@ -6,6 +6,8 @@ use crate::ctap2::commands::client_pin::PinUvAuthTokenPermission;
 use crate::ctap2::commands::get_info::AuthenticatorInfo;
 use crate::errors::AuthenticatorError;
 use crate::{ctap2::commands::CommandError, transport::errors::HIDError};
+
+use pqc_kyber::encapsulate;
 use serde::{
     de::{Error as SerdeError, MapAccess, Unexpected, Visitor},
     ser::SerializeMap,
@@ -14,6 +16,7 @@ use serde::{
 use serde_bytes::ByteBuf;
 use std::convert::TryFrom;
 use std::fmt;
+use std::io::Bytes;
 
 #[cfg(feature = "crypto_nss")]
 mod nss;
@@ -120,13 +123,58 @@ trait PinProtocolImpl: ClonablePinProtocolImpl {
             key: COSEKeyType::EC2(client_cose_ec2_key),
         };
 
-        let shared_secret = SharedSecret {
-            pin_protocol: PinUvAuthProtocol(self.clone_box()),
-            key: self.kdf(&shared_point)?,
-            inputs: PublicInputs {
-                peer: peer_cose_key.clone(),
-                client: client_cose_key,
-            },
+        let shared_secret: SharedSecret = match peer_cose_key.alg {
+            // There is no COSEAlgorithm for ECDHE with the KDF used here. Section 6.5.6. of CTAP
+            // 2.1 says to use value -25 (= ECDH_ES_HKDF256) even though "this is not the algorithm
+            // actually used".
+            COSEAlgorithm::ECDH_ES_HKDF256 => {
+                let peer_cose_ec2_key = match peer_cose_key.key {
+                    COSEKeyType::EC2(ref key) => key,
+                    _ => return Err(CryptoError::UnsupportedKeyType),
+                };
+
+                let peer_spki = peer_cose_ec2_key.der_spki()?;
+
+                let (shared_point, client_public_sec1) = ecdhe_p256_raw(&peer_spki)?;
+
+                let client_cose_ec2_key =
+                    COSEEC2Key::from_sec1_uncompressed(Curve::SECP256R1, &client_public_sec1)?;
+
+                let client_cose_key = COSEKey {
+                    alg: COSEAlgorithm::ECDH_ES_HKDF256,
+                    key: COSEKeyType::EC2(client_cose_ec2_key),
+                };
+
+                SharedSecret {
+                    pin_protocol: PinUvAuthProtocol(self.clone_box()),
+                    key: self.kdf(&shared_point)?,
+                    inputs: PublicInputs {
+                        peer: peer_cose_key.clone(),
+                        client: Some(client_cose_key),
+                        kyberCipherText: None,
+                    },
+                }
+            }
+            COSEAlgorithm::KYBER768 => {
+                let mut rng = rand::thread_rng();
+                // browser encapsulates a shared secret using authenticator's public key
+                let k = match peer_cose_key.key {
+                    COSEKeyType::PQCKEM(ref key) => key.x.clone(),
+                    _ => return Err(CryptoError::UnsupportedKeyType),
+                };
+                let (ciphertext, kyber_shared_secret) = encapsulate(&k, &mut rng).unwrap();
+                SharedSecret {
+                    pin_protocol: PinUvAuthProtocol(self.clone_box()),
+                    key: kyber_shared_secret.to_vec(),
+                    inputs: PublicInputs {
+                        peer: peer_cose_key.clone(),
+                        client: None,
+                        kyberCipherText: Some(ciphertext.to_vec()),
+                    },
+                }
+            }
+
+            other => return Err(CryptoError::UnsupportedAlgorithm(other)),
         };
 
         Ok(shared_secret)
@@ -146,6 +194,9 @@ impl TryFrom<&AuthenticatorInfo> for PinUvAuthProtocol {
                 match proto_id {
                     1 => return Ok(PinUvAuthProtocol(Box::new(PinUvAuth1 {}))),
                     2 => return Ok(PinUvAuthProtocol(Box::new(PinUvAuth2 {}))),
+                    // Added this new protocol ID to perform PQ KEM (Kyber768).
+                    // If an authenticator supports Protocol 3, the browser should attempt to PQ KEM otherwise perform conventional KEM.
+                    3 => return Ok(PinUvAuthProtocol(Box::new(PinUvAuth3 {}))),
                     _ => continue,
                 }
             }
@@ -301,10 +352,56 @@ impl PinProtocolImpl for PinUvAuth2 {
     }
 }
 
+// CTAP 2.1, Kyber768
+#[derive(Copy, Clone)]
+pub struct PinUvAuth3;
+
+impl PinProtocolImpl for PinUvAuth3 {
+    fn protocol_id(&self) -> u64 {
+        3
+    }
+
+    fn initialize(&self) {}
+
+    fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // [CTAP 2.1]
+        // encrypt(key, demPlaintext) → ciphertext
+        //      Return the AES-256-CBC encryption of plaintext using an all-zero IV. (No padding is
+        //      performed as the size of plaintext is required to be a multiple of the AES block
+        //      length.)
+        encrypt_aes_256_cbc_no_pad(key, None, plaintext)
+    }
+
+    fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // [CTAP 2.1]
+        // decrypt(key, demCiphertext) → plaintext | error
+        //      If the size of ciphertext is not a multiple of the AES block length, return error.
+        //      Otherwise return the AES-256-CBC decryption of ciphertext using an all-zero IV.
+        decrypt_aes_256_cbc_no_pad(key, None, ciphertext)
+    }
+
+    fn authenticate(&self, key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // [CTAP 2.1]
+        // authenticate(key, message) → signature
+        //      Return the first 16 bytes of the result of computing HMAC-SHA-256 with the given
+        //      key and message.
+        let mut hmac = hmac_sha256(key, message)?;
+        hmac.truncate(16);
+        Ok(hmac)
+    }
+
+    fn kdf(&self, z: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // kdf(Z) → sharedSecret
+        //         Return SHA-256(Z)
+        sha256(z)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PublicInputs {
-    client: COSEKey,
+    client: Option<COSEKey>,
     peer: COSEKey,
+    kyberCipherText: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -336,11 +433,14 @@ impl SharedSecret {
     pub fn authenticate(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.pin_protocol.0.authenticate(&self.key, message)
     }
-    pub fn client_input(&self) -> &COSEKey {
-        &self.inputs.client
+    pub fn client_input(&self) -> Option<&COSEKey> {
+        self.inputs.client.as_ref()
     }
     pub fn peer_input(&self) -> &COSEKey {
         &self.inputs.peer
+    }
+    pub fn kyber_ciphertext_input(&self) -> Option<&Vec<u8>> {
+        self.inputs.kyberCipherText.as_ref()
     }
 }
 
@@ -505,6 +605,8 @@ pub enum COSEAlgorithm {
     ECDH_SS_HKDF256 = -27,             //     ECDH SS w/ HKDF - generate key directly
     ECDH_ES_HKDF512 = -26,             //     ECDH ES w/ HKDF - generate key directly
     ECDH_ES_HKDF256 = -25,             //     ECDH ES w/ HKDF - generate key directly
+    KYBER768 = -24,                    //     ECDH ES w/ HKDF - generate key directly
+    CRYDI3 = -20,                      //     Dilithium 3
     SHAKE128 = -18,                    //     SHAKE-128 256-bit Hash Value
     SHA512_256 = -17,                  //     SHA-2 512-bit Hash truncated to 256-bits
     SHA256 = -16,                      //     SHA-2 256-bit Hash
@@ -802,6 +904,21 @@ impl COSERSAKey {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct COSECRYDIL3Key {
+    pub x: Vec<u8>,
+}
+
+impl COSECRYDIL3Key {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct COSEPQCKEMKey {
+    /// The public key.
+    pub x: Vec<u8>,
+}
+
+impl COSEPQCKEMKey {}
+
 // https://tools.ietf.org/html/rfc8152#section-13
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -814,6 +931,9 @@ pub enum COSEKeyTypeId {
     EC2 = 2,
     /// RSA
     RSA = 3,
+    // PQC
+    LWE = 5,
+    PQCKEM = 6,
 }
 
 impl Serialize for COSEKeyTypeId {
@@ -832,6 +952,8 @@ impl TryFrom<i64> for COSEKeyTypeId {
             i if i == COSEKeyTypeId::OKP as i64 => Ok(COSEKeyTypeId::OKP),
             i if i == COSEKeyTypeId::EC2 as i64 => Ok(COSEKeyTypeId::EC2),
             i if i == COSEKeyTypeId::RSA as i64 => Ok(COSEKeyTypeId::RSA),
+            i if i == COSEKeyTypeId::LWE as i64 => Ok(COSEKeyTypeId::LWE),
+            i if i == COSEKeyTypeId::PQCKEM as i64 => Ok(COSEKeyTypeId::PQCKEM),
             _ => Err(CryptoError::UnknownKeyType),
         }
     }
@@ -848,6 +970,9 @@ pub enum COSEKeyType {
     OKP(COSEOKPKey),
     /// Identifies this as an RSA key
     RSA(COSERSAKey),
+    // PQC KEM,
+    CRYDI3(COSECRYDIL3Key),
+    PQCKEM(COSEPQCKEMKey),
 }
 
 /// A COSE Key as provided by the Authenticator. You should never need
@@ -882,6 +1007,9 @@ impl COSEKey {
             COSEKeyType::EC2(ec2_key) => ec2_key.der_spki(),
             COSEKeyType::OKP(okp_key) => okp_key.der_spki(),
             COSEKeyType::RSA(rsa_key) => rsa_key.der_spki(),
+            // Need to address these todos; need to implement the `der_spki` functionality.
+            COSEKeyType::CRYDI3(dil_key) => todo!(),
+            COSEKeyType::PQCKEM(kem_key) => todo!(),
         }
     }
 }
@@ -957,6 +1085,9 @@ impl<'de> Deserialize<'de> for COSEKey {
                                 let value: ByteBuf = map.next_value()?;
                                 n = Some(value.to_vec());
                             }
+                            // Address these todos
+                            Some(COSEKeyTypeId::LWE) => todo!(),
+                            Some(COSEKeyTypeId::PQCKEM) => todo!(),
                         },
                         -2 => match key_type {
                             None => return Err(SerdeError::missing_field("key_type")),
@@ -974,6 +1105,9 @@ impl<'de> Deserialize<'de> for COSEKey {
                                 let value: ByteBuf = map.next_value()?;
                                 e = Some(value.to_vec());
                             }
+                            // Address these todos
+                            Some(COSEKeyTypeId::LWE) => todo!(),
+                            Some(COSEKeyTypeId::PQCKEM) => todo!(),
                         },
                         -3 if key_type == Some(COSEKeyTypeId::EC2) => {
                             if y.is_some() {
@@ -1008,6 +1142,15 @@ impl<'de> Deserialize<'de> for COSEKey {
                         let e = e.ok_or_else(|| SerdeError::missing_field("e (-2)"))?;
                         COSEKeyType::RSA(COSERSAKey { e, n })
                     }
+                    COSEKeyTypeId::LWE => {
+                        info!("in deserialize CRYDI3");
+                        let x = x.ok_or_else(|| SerdeError::missing_field("x (-2)"))?;
+                        COSEKeyType::CRYDI3(COSECRYDIL3Key { x })
+                    }
+                    COSEKeyTypeId::PQCKEM => {
+                        let x = x.ok_or_else(|| SerdeError::missing_field("x (-2)"))?;
+                        COSEKeyType::PQCKEM(COSEPQCKEMKey { x })
+                    }
                 };
                 Ok(COSEKey { alg, key: res })
             }
@@ -1026,6 +1169,8 @@ impl Serialize for COSEKey {
             COSEKeyType::OKP(_) => 4,
             COSEKeyType::EC2(_) => 5,
             COSEKeyType::RSA(_) => 4,
+            COSEKeyType::CRYDI3(_) => 3,
+            COSEKeyType::PQCKEM(_) => 3,
         };
         let mut map = serializer.serialize_map(Some(map_len))?;
         match &self.key {
@@ -1047,6 +1192,16 @@ impl Serialize for COSEKey {
                 map.serialize_entry(&3, &self.alg)?;
                 map.serialize_entry(&-1, &serde_bytes::Bytes::new(&key.n))?;
                 map.serialize_entry(&-2, &serde_bytes::Bytes::new(&key.e))?;
+            }
+            COSEKeyType::PQCKEM(key) => {
+                map.serialize_entry(&1, &COSEKeyTypeId::PQCKEM)?;
+                map.serialize_entry(&3, &self.alg)?;
+                map.serialize_entry(&-2, &key.x)?;
+            }
+            COSEKeyType::CRYDI3(key) => {
+                map.serialize_entry(&1, &(COSEKeyTypeId::LWE as u8))?;
+                map.serialize_entry(&3, &self.alg)?;
+                map.serialize_entry(&-2, &serde_bytes::Bytes::new(&key.x))?;
             }
         }
 
@@ -1423,14 +1578,15 @@ mod test {
             pin_protocol: PinUvAuthProtocol(Box::new(PinUvAuth1 {})),
             key: sha256(&shared_point).unwrap(),
             inputs: PublicInputs {
-                client: COSEKey {
+                client: Some(COSEKey {
                     alg: COSEAlgorithm::ES256,
                     key: COSEKeyType::EC2(client_ec2_key),
-                },
+                }),
                 peer: COSEKey {
                     alg: COSEAlgorithm::ES256,
                     key: COSEKeyType::EC2(peer_ec2_key),
                 },
+                kyberCipherText: None,
             },
         };
         assert_eq!(shared_secret.key, SHARED);
