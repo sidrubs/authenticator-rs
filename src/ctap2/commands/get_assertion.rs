@@ -104,7 +104,7 @@ impl HmacSecretExtension {
             None => secret.encrypt(&self.salt1[..32]),
         }?;
         let salt_auth = secret.authenticate(&salt_enc)?;
-        let public_key = secret.client_input().clone();
+        let public_key = secret.client_input().unwrap().clone();
         self.calculated_hmac = Some(CalculatedHmacSecretExtension {
             public_key,
             salt_enc,

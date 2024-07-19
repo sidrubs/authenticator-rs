@@ -5,7 +5,8 @@
 ### Changes
 - Currently adding the changes [here](https://github.com/mozilla/authenticator-rs/compare/ctap2-2021...sandbox-quantum:authenticator-rs_fork:nitrokey-pqc-fido2) to the latest version of `authenticator-rs`.
   - Added `Cargo.toml`
-  - Starting to add `src/crypto/mod.rs`, added all the bits (I think). Just need to get it to compile.
+  - Starting to add `src/crypto/mod.rs`, added all the bits (I think). Need to complete the todos
+  - Added `src/ctap2/commands/client_pin.rs`
 
 
 ### Building
