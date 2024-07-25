@@ -1,7 +1,7 @@
 [package]
 name = "authenticator"
-version = "0.4.0-alpha.24"
-authors = ["J.C. Jones <jc@mozilla.com>", "Tim Taubert <ttaubert@mozilla.com>", "Kyle Machulis <kyle@nonpolynomial.com>"]
+version = "0.4.0"
+authors = [ "Dana Keeler <dkeeler@mozilla.com>", "J.C. Jones <jc@mozilla.com>", "John Schanck <jschanck@mozilla.com>", "Kyle Machulis <kyle@nonpolynomial.com>", "Martin Sirringhaus <martin.sirringhaus@suse.com", "Tim Taubert <ttaubert@mozilla.com>" ]
 keywords = ["ctap2", "u2f", "fido", "webauthn"]
 categories = ["cryptography", "hardware-support", "os"]
 repository = "https://github.com/mozilla/authenticator-rs/"
