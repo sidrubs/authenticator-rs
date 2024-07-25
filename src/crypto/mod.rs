@@ -341,6 +341,23 @@ impl SharedSecret {
     pub fn peer_input(&self) -> &COSEKey {
         &self.inputs.peer
     }
+
+    #[cfg(test)]
+    pub fn new_test(
+        pin_protocol: PinUvAuthProtocol,
+        key: Vec<u8>,
+        client_input: COSEKey,
+        peer_input: COSEKey,
+    ) -> Self {
+        Self {
+            pin_protocol,
+            key,
+            inputs: PublicInputs {
+                client: client_input,
+                peer: peer_input,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1073,7 +1090,7 @@ impl Serialize for COSEKey {
 }
 
 /// Errors that can be returned from COSE functions.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum CryptoError {
     // DecodingFailure,
     LibraryFailure,
