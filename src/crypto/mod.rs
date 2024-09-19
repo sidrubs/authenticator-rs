@@ -640,7 +640,7 @@ pub enum COSEAlgorithm {
     ECDH_SS_HKDF256 = -27,             //     ECDH SS w/ HKDF - generate key directly
     ECDH_ES_HKDF512 = -26,             //     ECDH ES w/ HKDF - generate key directly
     ECDH_ES_HKDF256 = -25,             //     ECDH ES w/ HKDF - generate key directly
-    KYBER768 = -24,                    //     ECDH ES w/ HKDF - generate key directly
+    KYBER768 = -24,                    //     Kyber
     CRYDI3 = -20,                      //     Dilithium 3
     SHAKE128 = -18,                    //     SHAKE-128 256-bit Hash Value
     SHA512_256 = -17,                  //     SHA-2 512-bit Hash truncated to 256-bits
@@ -753,6 +753,8 @@ impl TryFrom<i64> for COSEAlgorithm {
             i if i == COSEAlgorithm::ECDH_SS_HKDF256 as i64 => Ok(COSEAlgorithm::ECDH_SS_HKDF256),
             i if i == COSEAlgorithm::ECDH_ES_HKDF512 as i64 => Ok(COSEAlgorithm::ECDH_ES_HKDF512),
             i if i == COSEAlgorithm::ECDH_ES_HKDF256 as i64 => Ok(COSEAlgorithm::ECDH_ES_HKDF256),
+            i if i == COSEAlgorithm::KYBER768 as i64 => Ok(COSEAlgorithm::KYBER768),
+            i if i == COSEAlgorithm::CRYDI3 as i64 => Ok(COSEAlgorithm::CRYDI3),
             i if i == COSEAlgorithm::SHAKE128 as i64 => Ok(COSEAlgorithm::SHAKE128),
             i if i == COSEAlgorithm::SHA512_256 as i64 => Ok(COSEAlgorithm::SHA512_256),
             i if i == COSEAlgorithm::SHA256 as i64 => Ok(COSEAlgorithm::SHA256),
